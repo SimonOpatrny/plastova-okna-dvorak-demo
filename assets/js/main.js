@@ -30,6 +30,47 @@
     });
   }
 
+  // Product campaign banner: manual controls and measured auto-advance.
+  // Pauses with pointer interaction or keyboard focus and respects reduced motion.
+  const hero = $('[data-hero-carousel]');
+  if (hero) {
+    const slides = $$('[data-hero-slide]', hero);
+    const selectors = $$('[data-slide-to]', hero);
+    let selected = 0;
+    let clock = null;
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    function selectSlide(index) {
+      selected = (index + slides.length) % slides.length;
+      slides.forEach((slide, i) => {
+        const current = i === selected;
+        slide.classList.toggle('is-active', current);
+        slide.setAttribute('aria-hidden', String(!current));
+        slide.inert = !current;
+      });
+      selectors.forEach((button, i) => {
+        button.classList.toggle('is-active', i === selected);
+        button.setAttribute('aria-pressed', String(i === selected));
+      });
+    }
+    function stopRotation() { if (clock) { clearInterval(clock); clock = null; } }
+    function startRotation() {
+      stopRotation();
+      if (!reduceMotion && !document.hidden && !hero.matches(':hover') && !hero.contains(document.activeElement)) {
+        clock = setInterval(() => selectSlide(selected + 1), 8500);
+      }
+    }
+    selectors.forEach((button, i) => button.addEventListener('click', () => { selectSlide(i); startRotation(); }));
+    $('[data-slide-prev]', hero)?.addEventListener('click', () => { selectSlide(selected - 1); startRotation(); });
+    $('[data-slide-next]', hero)?.addEventListener('click', () => { selectSlide(selected + 1); startRotation(); });
+    hero.addEventListener('mouseenter', stopRotation);
+    hero.addEventListener('mouseleave', startRotation);
+    hero.addEventListener('focusin', stopRotation);
+    hero.addEventListener('focusout', () => requestAnimationFrame(startRotation));
+    document.addEventListener('visibilitychange', startRotation);
+    selectSlide(0);
+    startRotation();
+  }
+
   // Analytics: GA4 is not downloaded before voluntary permission.
   const gaId = document.body.dataset.ga4?.trim() || '';
   const consentKey = 'dvorak_cookie_consent_v1';
@@ -94,8 +135,8 @@
     const item = items[current];
     const img = $('img', lightbox);
     img.src = item.dataset.full;
-    img.alt = item.dataset.caption + ' — fotografie z původního webu';
-    $('.lightbox-description', lightbox).textContent = item.dataset.caption + ' · původní web';
+    img.alt = item.dataset.caption + ' — ilustrační fotografie';
+    $('.lightbox-description', lightbox).textContent = item.dataset.caption + ' · ilustrační foto';
     $('.lightbox-position', lightbox).textContent = (current + 1) + ' / ' + items.length;
   }
   function closeLightbox() {
@@ -138,72 +179,82 @@
     });
   }
 
-  // Validation and actual POST to PHP endpoint. Never fake a success state.
+  // Static HTML mode: no server or fake success, prepare mailto message only.
   const form = $('#inquiry-form');
   const status = $('#form-status');
-  if (form && status) {
-    function report(message, error = true) {
-      status.hidden = false;
-      status.classList.toggle('is-error', error);
-      status.textContent = message;
-      status.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'center' });
+  if (form) {
+    const params = new URLSearchParams(location.search);
+    const type = form.elements.namedItem('type');
+    const locality = form.elements.namedItem('location');
+    if (type && params.has('typ')) {
+      const v = params.get('typ');
+      if ([...type.options].some(o => o.value === v)) type.value = v;
     }
-    function clearErrors() {
-      $$('[aria-invalid="true"]', form).forEach(el => el.removeAttribute('aria-invalid'));
-      $$('.field-error', form).forEach(el => el.remove());
-    }
-    function markError(name, message) {
-      const input = form.elements.namedItem(name);
-      if (!input || !(input instanceof HTMLElement)) return;
-      input.setAttribute('aria-invalid', 'true');
-      const note = document.createElement('p');
-      note.className = 'field-error'; note.textContent = message;
-      const field = input.closest('.field, .check-field');
-      if (field) field.appendChild(note);
-    }
-    form.addEventListener('submit', async event => {
+    if (locality && params.has('location')) locality.value = (params.get('location') || '').slice(0,120);
+    form.addEventListener('submit', event => {
       event.preventDefault();
-      clearErrors();
-      if (!form.checkValidity()) {
-        const invalid = $$('input:invalid, select:invalid, textarea:invalid', form);
-        invalid.forEach(input => markError(input.name, input.validity.valueMissing ? 'Toto pole je povinné.' : 'Zkontrolujte prosím zadanou hodnotu.'));
-        invalid[0]?.focus();
-        report('Zkontrolujte prosím označená pole.');
-        return;
+      if (!form.reportValidity()) return;
+      const data = new FormData(form);
+      const subject = 'Nezávazná poptávka – ' + String(data.get('type') || '');
+      const body = [
+        'Dobrý den,', '', 'rád(a) bych požádal(a) o nezávaznou nabídku.', '',
+        'Jméno: ' + data.get('name'), 'E-mail: ' + data.get('email'),
+        'Telefon: ' + data.get('phone'), 'Produkt: ' + data.get('type'),
+        'Lokalita: ' + data.get('location'), '', 'Zpráva:', data.get('message'),
+        '', 'S pozdravem', data.get('name')
+      ].join('\n');
+      if (status) {
+        status.hidden = false;
+        status.classList.remove('is-error');
+        status.textContent = 'Otevře se vaše e-mailová aplikace. V ní prosím zprávu skutečně odešlete; zatím nebyla odeslána.';
       }
-      const submit = $('button[type="submit"]', form);
-      submit.disabled = true;
-      const original = submit.textContent;
-      submit.textContent = 'Odesíláme…';
-      try {
-        const response = await fetch(form.action, {
-          method: 'POST',
-          body: new FormData(form),
-          headers: { 'Accept': 'application/json' },
-          credentials: 'same-origin'
-        });
-        const data = await response.json();
-        if (!response.ok || !data.ok) {
-          if (data.errors) Object.entries(data.errors).forEach(([name, message]) => markError(name, message));
-          report(data.message || 'Odeslání nebylo úspěšné. Zkuste to znovu.');
-          return;
-        }
-        report(data.message, false);
-        form.reset();
-        track('form_submit', { form_name: 'nezavazna_poptavka' });
-        // The CSRF token rotates after success; reload token from freshly rendered page.
-        const reload = await fetch(location.href, { credentials: 'same-origin' });
-        const html = await reload.text();
-        const parsed = new DOMParser().parseFromString(html, 'text/html');
-        const token = $('input[name="csrf"]', parsed);
-        if (token) $('input[name="csrf"]', form).value = token.value;
-        $('input[name="started_at"]', form).value = String(Math.floor(Date.now() / 1000));
-      } catch (error) {
-        report('Nepodařilo se spojit se serverem. Zkuste to prosím později nebo nás kontaktujte e-mailem.');
-      } finally {
-        submit.disabled = false;
-        submit.textContent = original;
-      }
+      window.location.href = 'mailto:dvorak.zd@seznam.cz?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(body);
     });
   }
+
+  // V4 progressive enhancements: accessible reveal, reading progress, and product guide.
+  const motionReduced = window.matchMedia('(prefers-reduced-motion: reduce)');
+  const progress = document.querySelector('.v4-scroll-progress');
+  let rafScheduled = false;
+  const drawProgress = () => {
+    const available = document.documentElement.scrollHeight - window.innerHeight;
+    if (progress) progress.style.transform = `scaleX(${available > 0 ? Math.min(1, window.scrollY / available) : 0})`;
+    document.body.classList.toggle('v4-scrolled', window.scrollY > 110);
+    rafScheduled = false;
+  };
+  window.addEventListener('scroll', () => { if (!rafScheduled) { rafScheduled = true; requestAnimationFrame(drawProgress); } }, { passive: true });
+  drawProgress();
+  if ('IntersectionObserver' in window && !motionReduced.matches) {
+    const targets = document.querySelectorAll('.commerce-head, .showcase-card, .v3-mini-card, .process-grid article, .v3-split, .v4-faq-item, .material-section, .v4-selector');
+    const reveal = new IntersectionObserver((entries, observer) => {
+      for (const entry of entries) if (entry.isIntersecting) { entry.target.classList.add('v4-inview'); observer.unobserve(entry.target); }
+    }, { threshold: .1, rootMargin: '0px 0px -24px 0px' });
+    targets.forEach(el => { el.classList.add('v4-reveal'); reveal.observe(el); });
+  }
+  const selector = document.querySelector('[data-product-selector]');
+  if (selector) {
+    const choices = {
+      okna: { kicker:'PROSVĚTLENÝ DOMOV', heading:'Okna, která dávají prostoru světlo.', text:'Plastová, hliníková i dřevěná okna. Vyberte provedení pro novostavbu nebo rekonstrukci a pošlete nám základní údaje.', image:'', alt:'Ilustrační dům s velkými okny',href:'okna.html', label:'Prohlédnout okna ↗',quote:'kontakt.html?typ=Plastová+okna#poptavka'},
+      dvere: { kicker:'PRVNÍ DOJEM', heading:'Vstup, který má svůj charakter.',text:'Od materiálu až po design. Prohlédněte si možnosti vchodových dveří a slaďte vstup s architekturou domu.',image:'',alt:'Ilustrační vstup do domu',href:'dvere.html',label:'Prohlédnout dveře ↗',quote:'kontakt.html?typ=Dveře#poptavka'},
+      pergoly: { kicker:'PROSTOR NAVÍC',heading:'Další místo pro společné chvíle.',text:'Pergoly, zastřešení teras a zimní zahrady. Představte nám prostor, který chcete vytvořit.',image:'',alt:'Ilustrační dům s venkovní terasou',href:'pergoly.html',label:'Prohlédnout pergoly ↗',quote:'kontakt.html?typ=Pergoly#poptavka'}
+    };
+    // Use already rendered image URL as base and verified illustrative source URLs.
+    choices.okna.image = selector.querySelector('[data-selector-image]').src;
+    choices.dvere.image = 'https://images.pexels.com/photos/36777846/pexels-photo-36777846.jpeg?auto=compress&cs=tinysrgb&w=1400';
+    choices.pergoly.image = 'https://images.pexels.com/photos/35651529/pexels-photo-35651529.jpeg?auto=compress&cs=tinysrgb&w=1400';
+    selector.querySelectorAll('[data-select-product]').forEach(button => button.addEventListener('click', () => {
+      const item = choices[button.dataset.selectProduct]; if (!item) return;
+      selector.querySelectorAll('[data-select-product]').forEach(b => { const active = b === button; b.classList.toggle('is-selected',active); b.setAttribute('aria-pressed',String(active)); });
+      const picture=selector.querySelector('[data-selector-image]');picture.src=item.image;picture.alt=item.alt;
+      selector.querySelector('[data-selector-kicker]').textContent=item.kicker;
+      selector.querySelector('[data-selector-heading]').textContent=item.heading;
+      selector.querySelector('[data-selector-text]').textContent=item.text;
+      const link=selector.querySelector('[data-selector-link]');link.href=item.href;link.textContent=item.label;
+      selector.querySelector('[data-selector-quote]').href=item.quote;
+    }));
+  }
+  document.querySelectorAll('.v4-faq-item').forEach(detail => detail.addEventListener('toggle', () => {
+    if (detail.open) detail.closest('.v4-faq-items').querySelectorAll('.v4-faq-item').forEach(other => { if (other !== detail) other.open = false; });
+  }));
+
 })();
